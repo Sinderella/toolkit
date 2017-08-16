@@ -3,24 +3,30 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"log"
 	net_url "net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 
 	req "github.com/levigross/grequests"
 )
 
-var F, _ = os.OpenFile("debug.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+var re = regexp.MustCompile("<title>(.*)</title>")
 
+// URLRecord is for keeping information for each URL
 type URLRecord struct {
-	URL string
-	IIS string
+	URL   string
+	IIS   string
+	IsIIS bool
 }
 
+// URLRecords is a slice of URLRecord
+type URLRecords []*URLRecord
+
+// NewURLRecord is for creating a new URLRecord
 func NewURLRecord(url string) *URLRecord {
-	return &URLRecord{url, ""}
+	return &URLRecord{url, "", false}
 }
 
 func getRequestOptions() *req.RequestOptions {
@@ -28,7 +34,7 @@ func getRequestOptions() *req.RequestOptions {
 		proxies := make(map[string]*url.URL)
 		u, err := url.Parse("http://127.0.0.1:8080")
 		if err != nil {
-			log.Fatal(err)
+			fmt.Fatal(err)
 		}
 		proxies["http"] = u
 		proxies["https"] = u
@@ -37,6 +43,7 @@ func getRequestOptions() *req.RequestOptions {
 	return &req.RequestOptions{InsecureSkipVerify: true}
 }
 
+// ScanURL handles passed URLs to start collecting information and send each URLRecord through the result channel
 func ScanURL(done <-chan struct{}, urls <-chan string, result chan<- *URLRecord) {
 	for url := range urls {
 		fmt.Printf("Scanning %s\n", url)
@@ -46,31 +53,42 @@ func ScanURL(done <-chan struct{}, urls <-chan string, result chan<- *URLRecord)
 		ur := NewURLRecord(url)
 
 		resp, err := req.Get(ur.URL, getRequestOptions())
+		// TODO: Don't continue, pass ur with error
 		if err != nil {
 			switch err.(type) {
 			case *net_url.Error:
 				ur.URL = "https" + ur.URL[4:len(ur.URL)]
 				resp, err = req.Get(ur.URL, getRequestOptions())
 				if err != nil {
-					log.Println("Website unreachable: ", err)
-					return
+					fmt.Println("Website unreachable: ", err)
+					continue
 				}
 			default:
-				log.Println("Website unreachable: ", err)
-				return
+				fmt.Println("Website unreachable: ", err)
+				continue
 			}
 		}
 
-		// TODO: detect IIS version
-		for key, value := range resp.Header {
-			if hasElem(key, HeaderKeys) {
-				ur.Headers[key] = strings.Join(value, " ")
-			}
-		}
+		body := resp.String()
+		found := re.FindStringSubmatch(body)
 
-		for _, key := range HeaderKeys {
-			if !hasKey(key, ur.Headers) {
-				ur.MissingHeaders = append(ur.MissingHeaders, key)
+		if len(found) < 2 {
+			ur.IIS = "Not IIS? " + ur.URL
+			ur.IsIIS = false
+		} else {
+			switch found[1] {
+			case "IIS7":
+				ur.IIS = "7"
+				ur.IsIIS = true
+			case "Microsoft Internet Information Services 8":
+				ur.IIS = "8"
+				ur.IsIIS = true
+			case "IIS Windows Server":
+				ur.IIS = "8.5"
+				ur.IsIIS = true
+			default:
+				ur.IIS = "Not IIS? " + ur.URL
+				ur.IsIIS = false
 			}
 		}
 
@@ -104,6 +122,7 @@ func fetchURLs(done <-chan struct{}, urls <-chan string) (<-chan *URLRecord, <-c
 	return ur, errc
 }
 
+// FetchAll reads URLs off a file and then pass them to fetchURLs
 func FetchAll(filename string) (URLRecords, error) {
 	done := make(chan struct{})
 	urls := make(chan string)
@@ -111,12 +130,11 @@ func FetchAll(filename string) (URLRecords, error) {
 
 	c, _ := fetchURLs(done, urls)
 
-	log.Printf("Reading %s...", filename)
+	fmt.Printf("Reading %s...", filename)
 
 	file, err := os.Open(filename)
-
 	if err != nil {
-		log.Fatalln(err)
+		_ = fmt.Errorf("error :%s", err)
 	}
 	defer file.Close()
 
@@ -129,7 +147,7 @@ func FetchAll(filename string) (URLRecords, error) {
 	}()
 
 	m := make(URLRecords, 0)
-	log.Printf("Waiting for result...\n")
+	fmt.Printf("Waiting for result...\n")
 	for r := range c {
 		m = append(m, r)
 	}
@@ -138,8 +156,6 @@ func FetchAll(filename string) (URLRecords, error) {
 }
 
 func main() {
-	log.SetOutput(F)
-
 	if len(os.Args) != 2 {
 		fmt.Println("It requires a filename to read")
 		os.Exit(1)
@@ -148,31 +164,44 @@ func main() {
 	filename := os.Args[1]
 	results, _ := FetchAll(filename)
 
-	fmt.Println("Grouping...")
-	grouped := make(URLRecords, 0)
-	for _, ur1 := range results {
-		if grouped.isIn(ur1) {
-			continue
+	fmt.Println("IIS")
+	for _, result := range results {
+		if result.IsIIS {
+			fmt.Printf("%s\n", result.URL)
 		}
-		grouping := make(URLRecords, 0)
-		grouped = append(grouped, ur1)
-		grouping = append(grouping, ur1)
-		for _, ur2 := range results {
-			if len(ur2.MissingHeaders) != len(ur1.MissingHeaders) || grouped.isIn(ur2) {
-				continue
-			} else if ur1.HasSameMissingHeaders(ur2) {
-				grouping = append(grouping, ur2)
-				grouped = append(grouped, ur2)
-			}
-		}
-
-		for _, ur := range grouping {
-			fmt.Printf("[%s]()\n", ur.URL)
-		}
-
-		for _, missingheader := range ur1.MissingHeaders {
-			fmt.Printf(" * %s\n", missingheader)
-		}
-		fmt.Println()
 	}
+
+	fmt.Println("Non IIS")
+	for _, result := range results {
+		if !result.IsIIS {
+			fmt.Printf("%s\n", result.URL)
+		}
+	}
+	/*
+		for _, ur1 := range results {
+			if grouped.isIn(ur1) {
+				continue
+			}
+			grouping := make(URLRecords, 0)
+			grouped = append(grouped, ur1)
+			grouping = append(grouping, ur1)
+			for _, ur2 := range results {
+				if len(ur2.MissingHeaders) != len(ur1.MissingHeaders) || grouped.isIn(ur2) {
+					continue
+				} else if ur1.HasSameMissingHeaders(ur2) {
+					grouping = append(grouping, ur2)
+					grouped = append(grouped, ur2)
+				}
+			}
+
+			for _, ur := range grouping {
+				fmt.Printf("[%s]()\n", ur.URL)
+			}
+
+			for _, missingheader := range ur1.MissingHeaders {
+				fmt.Printf(" * %s\n", missingheader)
+			}
+			fmt.Println()
+		}
+	*/
 }

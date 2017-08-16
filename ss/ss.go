@@ -90,8 +90,8 @@ func main() {
 			}
 
 			if !noFilter {
-				for _, filtering_port := range filtering_ports {
-					if filtering_port == port.Number {
+				for _, filteringPort := range filtering_ports {
+					if filteringPort == port.Number {
 						if !showedAddr {
 							fmt.Printf("%s\n", host.Address)
 							showedAddr = true
