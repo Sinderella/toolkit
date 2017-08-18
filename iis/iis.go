@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"fmt"
-	net_url "net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -16,9 +15,10 @@ var re = regexp.MustCompile("<title>(.*)</title>")
 
 // URLRecord is for keeping information for each URL
 type URLRecord struct {
-	URL   string
-	IIS   string
-	IsIIS bool
+	URL       string
+	IIS       string
+	IsIIS     bool
+	Reachable bool
 }
 
 // URLRecords is a slice of URLRecord
@@ -26,7 +26,7 @@ type URLRecords []*URLRecord
 
 // NewURLRecord is for creating a new URLRecord
 func NewURLRecord(url string) *URLRecord {
-	return &URLRecord{url, "", false}
+	return &URLRecord{url, "", false, true}
 }
 
 func getRequestOptions() *req.RequestOptions {
@@ -53,20 +53,10 @@ func ScanURL(done <-chan struct{}, urls <-chan string, result chan<- *URLRecord)
 		ur := NewURLRecord(url)
 
 		resp, err := req.Get(ur.URL, getRequestOptions())
-		// TODO: Don't continue, pass ur with error
 		if err != nil {
-			switch err.(type) {
-			case *net_url.Error:
-				ur.URL = "https" + ur.URL[4:len(ur.URL)]
-				resp, err = req.Get(ur.URL, getRequestOptions())
-				if err != nil {
-					fmt.Println("Website unreachable: ", err)
-					continue
-				}
-			default:
-				fmt.Println("Website unreachable: ", err)
-				continue
-			}
+			fmt.Println("Website unreachable: ", err)
+			ur.Reachable = false
+			result <- ur
 		}
 
 		body := resp.String()
@@ -130,11 +120,11 @@ func FetchAll(filename string) (URLRecords, error) {
 
 	c, _ := fetchURLs(done, urls)
 
-	fmt.Printf("Reading %s...", filename)
+	fmt.Printf("Reading %s...\n", filename)
 
 	file, err := os.Open(filename)
 	if err != nil {
-		_ = fmt.Errorf("error :%s", err)
+		fmt.Fprintln(os.Stderr, "error: ", err)
 	}
 	defer file.Close()
 
@@ -142,6 +132,9 @@ func FetchAll(filename string) (URLRecords, error) {
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
 			urls <- scanner.Text()
+		}
+		if err := scanner.Err(); err != nil {
+			fmt.Fprintln(os.Stderr, "error: ", err)
 		}
 		close(urls)
 	}()
@@ -177,6 +170,12 @@ func main() {
 			fmt.Printf("%s\n", result.URL)
 		}
 	}
+	fmt.Println("Unreachable")
+	for _, result := range results {
+		if !result.Reachable {
+			fmt.Printf("%s\n", result.URL)
+		}
+	
 	/*
 		for _, ur1 := range results {
 			if grouped.isIn(ur1) {
